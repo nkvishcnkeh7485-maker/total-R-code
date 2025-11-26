@@ -189,60 +189,127 @@ ggsave(filename = save_path, plot = final_plot, width = 10, height = 6, dpi = 60
 
 
 # growth change 2 ---------------------------------------------------------
-# 加载必要的包
-library(mgcv)
 library(ggplot2)
-library(patchwork)
-library(grid)
-library(ggpubr)
+library(dplyr)
+library(mgcv)
 
-setwd('E:/Daiyu19/在用数据')
 # 读取数据
-GamData <- read.table('./dataGAM17-21.txt', sep = ' ', header = TRUE)
-GamData$Year <- as.factor(GamData$Year)  
+setwd('E:/Daiyu19/在用数据')
+data <- read.table('./dataGAM17-21.txt', sep = ' ', header = TRUE)
 
-custom_colors <- c( "#c0504d", "#8064a2", "#4f81bd","#4bacc6", "#9bbb59")
+# 确保Year是因子类型
+data$Year <- factor(data$Year, levels = 2017:2021)
 
-# 1. 拟合GAM模型，将年份作为固定因子
-# 使用by参数为每个年份创建独立的平滑项，并添加Year作为固定效应
-#gam_model <- gam(IW ~ s(IWDay, bs = "cs") + s(Year, bs = "re"), data = GamData, method = "REML")
-gam_model <- gam(IW ~ s(IWDay, bs = "cs", by = as.factor(Year)) + as.factor(Year), data = GamData, method = "REML")
-# 2. 检验年份的显著性
-summary(gam_model) 
-anova_result <- anova(gam_model)  
-print(anova_result)
+# 过滤0-110天的数据
+data <- data %>%
+  filter(IWDay >= 0 & IWDay <= 110) %>%
+  na.omit()
 
-p1 <- ggplot(data = GamData, mapping = aes(x = IWDay, y = IW))+ 
-  scale_x_continuous(limits=c(0,110),breaks=seq(0,110,10))+
-  labs(x = "Age (days)", y = "Otolith daily increment width (μm)")+
-  ylim(0,8)+
-  geom_smooth(mapping = aes(color = as.factor(Year)),method = "gam", formula = y ~ s(x, bs = "cs"), span = 0.40, se = TRUE, size = 1.2 )+
-  # 添加垂直参考线
-  geom_vline(xintercept = 40, linetype = "dashed", color = "gray40", size = 0.7) + # <--- 主要添加这行
-  scale_color_manual(name="    ",values = custom_colors)+
-  theme_minimal()+
-  theme(panel.grid.major = element_line(colour = "gray40",linetype = "dashed"), panel.background = element_rect(fill = "aliceblue")) + 
-  theme(panel.grid.major = element_line(linetype = "blank"),
-        panel.background = element_rect(fill = NA)) + 
-  theme(plot.subtitle = element_text(family = "serif",size = 12), 
-        plot.title = element_text(family = "serif"),
-        axis.ticks = element_line(colour = "black"),
-        panel.grid.minor = element_line(linetype = "blank"),
-        axis.title = element_text(family = "serif",size = 13,face = "bold"), 
-        axis.text = element_text(colour = "black",size = 11),
-        axis.text.x = element_text(colour = "black",size = 11),
-        axis.text.y = element_text(colour = "black",size = 11),
-        legend.text = element_text(size = 11,family = "serif",face = "bold"),
-        legend.title = element_text(size = 13,family = "serif",face = "bold"), 
-        legend.key = element_blank(),
-        legend.background = element_blank(),
-        legend.box.background = element_blank())+
-  theme(text = element_text(family = "serif"))
+# 计算每个年龄点(IWDay)和年份的汇总统计量
+summary_data <- data %>%
+  group_by(Year, IWDay) %>%
+  summarise(
+    mean_IW = mean(IW, na.rm = TRUE),
+    sd_IW = sd(IW, na.rm = TRUE),
+    n = n(),
+    .groups = 'drop'
+  ) %>%
+  # 移除样本量太小的组
+  filter(n >= 3)
 
-p1
+# 对每个年份分别拟合GAM模型到均值数据
+pred_data <- data.frame()
 
-# save_path <- "E:/Daiyu19/導出圖片及PDF/growth change2.pdf"
-# ggsave(filename = save_path, plot = p1, width = 10.5, height = 4.5,dpi = 600)
+# 定义自定义颜色方案
+year_colors <- c("#c0504d", "#8064a2", "#4f81bd", "#4bacc6", "#9bbb59")
+names(year_colors) <- 2017:2021
+
+for (year in levels(summary_data$Year)) {
+  year_data <- summary_data %>% filter(Year == year)
+  
+  if (nrow(year_data) > 5) {
+    # 使用固定的k值和更高的gamma值，使曲线非常平滑
+    gam_model <- gam(mean_IW ~ s(IWDay, k = 10), 
+                     data = year_data, 
+                     method = "REML",
+                     gamma = 2.5)  # 更高的gamma值使曲线更平滑
+    
+    # 创建预测数据
+    new_data <- data.frame(
+      IWDay = seq(0, 110, length.out = 400),  # 进一步增加预测点数
+      Year = year
+    )
+    
+    # 获取均值预测
+    pred_mean <- predict(gam_model, newdata = new_data, se.fit = FALSE)
+    new_data$mean_IW <- as.numeric(pred_mean)
+    
+    # 简化标准差处理 - 使用线性插值而不是GAM，避免过度波动
+    new_data$sd_IW <- approx(year_data$IWDay, year_data$sd_IW, 
+                             xout = new_data$IWDay, rule = 2)$y
+    
+    pred_data <- bind_rows(pred_data, new_data)
+  }
+}
+
+# 创建生长曲线图，使用标准差展示数据离散程度
+final_plot <- ggplot() +
+  # 添加标准差阴影区域 (均值 ± 1个标准差)
+  geom_ribbon(data = pred_data, 
+              aes(x = IWDay, ymin = mean_IW - sd_IW, ymax = mean_IW + sd_IW, 
+                  fill = Year),
+              alpha = 0.10) +
+  # 添加GAM拟合的生长曲线
+  geom_line(data = pred_data, 
+            aes(x = IWDay, y = mean_IW, color = Year),
+            size = 1.2) +
+  # 在x=40处添加参考线
+  geom_vline(xintercept = 40, linetype = "dashed", color = "black", size = 0.8) +
+  # 添加参考线标签
+  annotate("text", x = 42, y = 11,  # 调整y坐标以适应新的y轴范围
+           label = "40 days", color = "black", size = 4, hjust = 0, family = "serif") +
+  # 设置y轴范围为0-12
+  coord_cartesian(ylim = c(0, 12)) +
+  scale_color_manual(values = year_colors, name = "Year") +
+  scale_fill_manual(values = year_colors, name = "Year") +
+  labs(
+    x = "Age (days)",
+    y = "Otolith Daily Increment Width (μm)") +
+  theme_bw(base_family = "serif") +
+  theme(
+    text = element_text(family = "serif", size = 12),
+    plot.caption = element_text(
+      hjust = 0.5,
+      size = 12,
+      face = "bold",
+      margin = margin(t = 10)
+    ),
+    axis.title = element_text(face = "bold"),
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank(),
+    panel.border = element_rect(color = "black", fill = NA, linewidth = 0.8),
+    legend.position = c(0.95, 0.98),
+    legend.justification = c(1, 1),
+    legend.title = element_text(face = "bold"),
+    legend.background = element_rect(fill = "white", color = "black", linewidth = 0.25)
+  )
+
+final_plot
+
+# 输出一些统计信息，帮助理解数据离散程度
+cat("Summary of standard deviations by year:\n")
+print(
+  summary_data %>%
+    group_by(Year) %>%
+    summarise(
+      mean_sd = mean(sd_IW, na.rm = TRUE),
+      min_sd = min(sd_IW, na.rm = TRUE),
+      max_sd = max(sd_IW, na.rm = TRUE),
+      n_points = n()
+    )
+)
+
+ggsave(filename = "growth_curve_final.png", plot = final_plot, width = 8, height = 4.2, dpi = 600)
 
 
 
@@ -561,6 +628,7 @@ print(final_plot)
 
 save_path <- "E:/Daiyu19/導出圖片及PDF/clustered box2.pdf"
 ggsave(filename = save_path, plot = final_plot, width = 6, height = 10,dpi = 600)
+
 
 
 
